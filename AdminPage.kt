@@ -1,7 +1,6 @@
 package com.nkdevs.chaarvisdonnebiryani
 
 import MenuAdapter
-import android.app.Activity
 import android.app.AlertDialog
 import android.app.Dialog
 import android.content.Intent
@@ -13,7 +12,6 @@ import android.provider.MediaStore
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.Menu
-import android.view.MenuItem
 import android.view.View
 import android.view.animation.AnimationUtils
 import android.widget.AdapterView
@@ -49,7 +47,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 import java.util.UUID
-
+import MenuItem
+import android.content.Context
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKeys
 
 class AdminPage : AppCompatActivity() {
 
@@ -61,29 +62,30 @@ class AdminPage : AppCompatActivity() {
     private lateinit var database: DatabaseReference
     private lateinit var buttonEditOffer: Button
     private lateinit var offerStatusRef: DatabaseReference
+    private lateinit var spinnerStatus: Spinner
 
-    //Menu related code below
+
     private val PICK_IMAGE_REQUEST = 1
     private var selectedImageUri: Uri? = null
     private lateinit var imagePreview: ImageView
     private lateinit var recyclerViewMenu: RecyclerView
     private lateinit var adapter: MenuAdapter
-    private val menuItems = mutableListOf<android.view.MenuItem>()
+    private val menuItems = mutableListOf<MenuItem>()
     private lateinit var firestore: FirebaseFirestore
     private lateinit var storage: FirebaseStorage
-    private var originalMenuItems = mutableListOf<android.view.MenuItem>()
+    private var originalMenuItems = mutableListOf<MenuItem>()
     private lateinit var sharedPreferences: SharedPreferences
-    //Menu related code above
 
 
     private var selectedOfferStatus: String? = null
-    private var selectedImageUri: Uri? = null
+    private var imageUri1: Uri? = null
 
-    private val PICK_BANNER_IMAGE_REQUEST = 101 // Request code for banner image
+    private val PICK_BANNER_IMAGE_REQUEST = 2 // Request code for banner image
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_admin_page)
+
 
         buttonAddItem = findViewById(R.id.buttonAddItem)
         buttonDoneHome = findViewById(R.id.buttonDoneHome)
@@ -97,19 +99,15 @@ class AdminPage : AppCompatActivity() {
 
         supportActionBar?.title = "Admin Dashboard"
 
-        // Handle "Add Item" button click
-        buttonAddItem.setOnClickListener {
-
-        }
-
         // Handle "Done" button click
         buttonDoneHome.setOnClickListener {
             updateRestaurantStatus()
             uploadOfferStatusToServer()
+            handleMenuChanges(buttonDoneHome)
 
 
-            if (selectedImageUri != null) {
-                uploadOfferImageToServer(selectedImageUri!!)
+            if (imageUri1 != null) {
+                uploadOfferImageToServer(imageUri1!!)
             }
         }
 
@@ -133,24 +131,14 @@ class AdminPage : AppCompatActivity() {
 
         database = FirebaseDatabase.getInstance().reference
 
-        val spinnerStatus = findViewById<Spinner>(R.id.spinnerStatus)
+        spinnerStatus = findViewById(R.id.spinnerStatus)
 
         setupStatusSpinner()
         fetchOfferStatus()
         loadBannerImage()
-
-// Listen for changes in the status from Firebase
-        database.child("restaurantStatus").get().addOnSuccessListener {
-            val currentStatus = it.value.toString()
-            val statusArray = resources.getStringArray(R.array.status_array)
-            val index = statusArray.indexOf(currentStatus)
-            if (index != -1) {
-                spinnerStatus.setSelection(index)
-            }
-        }
+        updateSpinnerStatus()
 
 
-        //Menu related code below
         firestore = FirebaseFirestore.getInstance()
         storage = FirebaseStorage.getInstance()
         sharedPreferences = getSharedPreferences("MenuData", MODE_PRIVATE)
@@ -158,7 +146,7 @@ class AdminPage : AppCompatActivity() {
         recyclerViewMenu = findViewById(R.id.recyclerViewMenu)
         recyclerViewMenu.layoutManager = LinearLayoutManager(this)
 
-        adapter = MenuAdapter(this, menuItems)
+        adapter = MenuAdapter(this, menuItems, isAdminPage = true)
         recyclerViewMenu.adapter = adapter
 
         val buttonAddItem: ImageView = findViewById(R.id.buttonAddItem)
@@ -166,17 +154,28 @@ class AdminPage : AppCompatActivity() {
             showAddItemPopup()
         }
 
-        val buttonDoneHome: Button = findViewById(R.id.buttonDoneHome)
-        buttonDoneHome.setOnClickListener {
-            handleMenuChanges(buttonDoneHome)
-        }
-
         showSplashScreen()
         fetchMenuItems()
-        //Menu related code above
 
     }
 
+
+    private fun updateSpinnerStatus() {
+        // Get the current status from the Firebase Realtime Database
+        database.child("restaurantStatus").get().addOnSuccessListener {
+            val currentStatus = it.value.toString()
+            val statusArray = resources.getStringArray(R.array.status_array)
+            val index = statusArray.indexOf(currentStatus)
+
+            // If the status exists in the array, set it as the selected item in the spinner
+            if (index != -1) {
+                spinnerStatus.setSelection(index)
+            }
+        }.addOnFailureListener {
+            // Handle failure (e.g., network error, permission issue)
+            it.printStackTrace()
+        }
+    }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
@@ -184,9 +183,13 @@ class AdminPage : AppCompatActivity() {
             val imageUri = data.data
             when (requestCode) {
                 PICK_BANNER_IMAGE_REQUEST -> {
-                    selectedImageUri = imageUri // Store the selected URI
+                    imageUri1 = imageUri // Store the selected URI
                     val bannerImage = MediaStore.Images.Media.getBitmap(contentResolver, imageUri)
                     bannerImageView.setImageBitmap(bannerImage) // Display the selected banner image
+                }
+                PICK_IMAGE_REQUEST -> {
+                    selectedImageUri = imageUri
+                    compressAndSetImage(selectedImageUri) // Handle the selected image
                 }
             }
         }
@@ -369,7 +372,7 @@ class AdminPage : AppCompatActivity() {
         return true
     }
 
-    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+    override fun onOptionsItemSelected(item: android.view.MenuItem): Boolean {
         return when (item.itemId) {
             R.id.action_profile -> {
                 // Handle profile icon click (e.g., show dropdown or go to profile screen)
@@ -391,7 +394,13 @@ class AdminPage : AppCompatActivity() {
             when (menuItem.itemId) {
                 R.id.action_logout -> {
                     // Handle logout logic here
+                    clearUserData(this) // Clear user data
                     Toast.makeText(this, "Logged out", Toast.LENGTH_SHORT).show()
+
+                    // Navigate to the login page (assuming you have a LoginActivity)
+                    val intent = Intent(this, LoginPage::class.java)
+                    intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK // Clear the stack
+                    startActivity(intent) // Start the login activity
                     true
                 }
                 else -> false
@@ -399,6 +408,25 @@ class AdminPage : AppCompatActivity() {
         }
 
         popupMenu.show()
+    }
+
+
+    private fun clearUserData(context: Context) {
+        // Create the master key and initialize EncryptedSharedPreferences
+        val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
+        val sharedPreferences = EncryptedSharedPreferences.create(
+            "secure_prefs_file", // File name
+            masterKeyAlias,
+            context, // Use 'context' or 'applicationContext'
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+
+        // Clear all data from EncryptedSharedPreferences
+        with(sharedPreferences.edit()) {
+            clear()
+            apply() // or commit() if you want to write changes synchronously
+        }
     }
 
     private fun showLocationPopup() {
@@ -452,14 +480,16 @@ class AdminPage : AppCompatActivity() {
         buttonViewOnMaps.setOnClickListener {
             val coordinates = textViewPreviousCoordinates.text.toString()
             if (coordinates != "No coordinates set") {
-                val uri = Uri.parse("geo:0,0?q=$coordinates")
+                // Using the URL format to open Google Maps with coordinates in the search bar
+                val uri = Uri.parse("https://www.google.com/maps/search/?api=1&query=$coordinates")
                 val intent = Intent(Intent.ACTION_VIEW, uri)
-                intent.setPackage("com.google.android.apps.maps")
+                intent.setPackage("com.google.android.apps.maps") // Target Google Maps app
                 startActivity(intent)
             } else {
                 Toast.makeText(this, "No coordinates available to view on maps", Toast.LENGTH_SHORT).show()
             }
         }
+
 
         // Show the dialog
         alertDialog.show()
@@ -530,7 +560,7 @@ class AdminPage : AppCompatActivity() {
     }
 
 
-    //Menu related code below
+
 
     private fun showSplashScreen() {
         Toast.makeText(this, "Loading, please wait...", Toast.LENGTH_SHORT).show()
@@ -578,13 +608,6 @@ class AdminPage : AppCompatActivity() {
         startActivityForResult(intent, PICK_IMAGE_REQUEST)
     }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == PICK_IMAGE_REQUEST && resultCode == Activity.RESULT_OK && data != null) {
-            selectedImageUri = data.data
-            compressAndSetImage(selectedImageUri)
-        }
-    }
 
     private fun compressAndSetImage(imageUri: Uri?) {
         imageUri?.let {
@@ -595,6 +618,7 @@ class AdminPage : AppCompatActivity() {
                 .into(imagePreview)
         }
     }
+
 
     private fun fetchMenuItems() {
         firestore.collection("menuItems")
@@ -625,6 +649,7 @@ class AdminPage : AppCompatActivity() {
                 Toast.makeText(this, "Error fetching menu items: ${e.message}", Toast.LENGTH_SHORT).show()
             }
     }
+
 
     private fun saveMenuItemMetadata(documents: List<DocumentSnapshot>) {
         val editor = sharedPreferences.edit()
@@ -657,7 +682,7 @@ class AdminPage : AppCompatActivity() {
         var completedOperations = 0
 
         for (menuItem in newItems) {
-            uploadImageToStorage(menuItem) { imageUri ->
+            uploadImageToStorage { imageUri ->
                 if (imageUri != null) {
                     saveMenuItemToFirestore(menuItem, imageUri)
                 }
@@ -677,6 +702,7 @@ class AdminPage : AppCompatActivity() {
             fetchMenuItems()
         }
     }
+
 
     private fun checkIfComplete(completedOperations: Int, totalOperations: Int, buttonDoneHome: Button) {
         if (completedOperations == totalOperations) {
@@ -725,7 +751,9 @@ class AdminPage : AppCompatActivity() {
             }
     }
 
-    private fun uploadImageToStorage(menuItem: MenuItem, onComplete: (String?) -> Unit) {
+
+
+    private fun uploadImageToStorage(onComplete: (String?) -> Unit) {
         val storageRef = storage.reference.child("menu_images/${UUID.randomUUID()}.jpg")
         val bitmap = MediaStore.Images.Media.getBitmap(contentResolver, selectedImageUri)
         val baos = ByteArrayOutputStream()
@@ -743,8 +771,4 @@ class AdminPage : AppCompatActivity() {
             onComplete(null)
         }
     }
-
-    //Menu related code above
-
 }
-
